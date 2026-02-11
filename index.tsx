@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom/client';
 
@@ -6,7 +5,8 @@ import ReactDOM from 'react-dom/client';
 declare const Peer: any;
 
 // --- CONFIGURATIE ---
-const GITHUB_URL = "https://v68799.github.io/PongGamecontroller/index.html";
+// Pas dit aan als je repository naam anders is
+const GITHUB_BASE_URL = "https://v68799.github.io/PongGamecontroller/";
 
 // --- COMPONENT: CONTROLLER ---
 const ControllerMode: React.FC<{ hostId: string; player: 1 | 2 }> = ({ hostId, player }) => {
@@ -15,18 +15,35 @@ const ControllerMode: React.FC<{ hostId: string; player: 1 | 2 }> = ({ hostId, p
   const peerRef = useRef<any>(null);
 
   useEffect(() => {
+    // We gebruiken een unieke ID voor de controller om conflicten te voorkomen
     const peer = new Peer();
     peerRef.current = peer;
 
-    peer.on('open', () => {
-      const conn = peer.connect(hostId);
+    peer.on('open', (id: string) => {
+      console.log('Controller online. ID:', id, 'Connecting to TV:', hostId);
+      const conn = peer.connect(hostId, { serialization: 'json' });
       connRef.current = conn;
+      
       conn.on('open', () => {
         setStatus('CONNECTED');
-        conn.send({ type: 'JOIN', player });
+        // Stuur herhaaldelijk JOIN totdat TV antwoordt
+        const joinInterval = setInterval(() => {
+          if (conn.open) conn.send({ type: 'JOIN', player });
+        }, 1000);
+        setTimeout(() => clearInterval(joinInterval), 5000);
       });
-      conn.on('error', () => setStatus('ERROR'));
+
+      conn.on('error', (err: any) => {
+        console.error('Connection error:', err);
+        setStatus('ERROR');
+      });
+      
       conn.on('close', () => setStatus('ERROR'));
+    });
+
+    peer.on('error', (err: any) => {
+      console.error('Peer error:', err);
+      setStatus('ERROR');
     });
 
     return () => peer.destroy();
@@ -52,8 +69,8 @@ const ControllerMode: React.FC<{ hostId: string; player: 1 | 2 }> = ({ hostId, p
           {status === 'CONNECTED' ? 'VERBONDEN' : 'VERBINDEN...'}
         </p>
       </div>
-      <div className="absolute bottom-12 text-white/20 uppercase font-bold text-[10px] tracking-widest">
-        Sleep om te bewegen
+      <div className="absolute bottom-12 text-white/20 uppercase font-bold text-[10px] tracking-widest text-center px-4">
+        {status === 'CONNECTED' ? 'Sleep op je scherm om te bewegen' : `Verbinding maken met kamer: ${hostId}`}
       </div>
     </div>
   );
@@ -63,6 +80,7 @@ const ControllerMode: React.FC<{ hostId: string; player: 1 | 2 }> = ({ hostId, p
 const TVMode: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [roomId, setRoomId] = useState('');
+  const [peerStatus, setPeerStatus] = useState('OFFLINE');
   const [joined, setJoined] = useState({ p1: false, p2: false });
   const state = useRef({ 
     p1Y: 0.5, p2Y: 0.5, 
@@ -76,11 +94,16 @@ const TVMode: React.FC = () => {
     setRoomId(id);
     const peer = new Peer(id);
 
+    peer.on('open', (id: string) => {
+      setPeerStatus('ONLINE');
+      console.log('TV ONLINE. Room ID:', id);
+    });
+
     peer.on('connection', (conn: any) => {
       conn.on('data', (data: any) => {
         if (data.type === 'JOIN') {
-          if (data.player === 1) setJoined(j => ({ ...j, p1: true }));
-          if (data.player === 2) setJoined(j => ({ ...j, p2: true }));
+          if (data.player === 1) setJoined(prev => ({ ...prev, p1: true }));
+          if (data.player === 2) setJoined(prev => ({ ...prev, p2: true }));
         }
         if (data.type === 'MOVE') {
           if (data.player === 1) state.current.p1Y = data.pos;
@@ -97,30 +120,6 @@ const TVMode: React.FC = () => {
       const w = canvas.width = window.innerWidth;
       const h = canvas.height = window.innerHeight;
 
-      if (joined.p1 && joined.p2) {
-        state.current.ballX += state.current.ballVX;
-        state.current.ballY += state.current.ballVY;
-
-        if (state.current.ballY < 0.05 || state.current.ballY > 0.95) state.current.ballVY *= -1;
-        
-        const paddleH = 0.2;
-        if (state.current.ballX < 0.03 && Math.abs(state.current.ballY - state.current.p1Y) < paddleH/2) {
-          state.current.ballVX = Math.abs(state.current.ballVX) * 1.1;
-        }
-        if (state.current.ballX > 0.97 && Math.abs(state.current.ballY - state.current.p2Y) < paddleH/2) {
-          state.current.ballVX = -Math.abs(state.current.ballVX) * 1.1;
-        }
-
-        if (state.current.ballX < 0) { state.current.p2Score++; resetBall(); }
-        if (state.current.ballX > 1) { state.current.p1Score++; resetBall(); }
-      }
-
-      function resetBall() {
-        state.current.ballX = 0.5; state.current.ballY = 0.5;
-        state.current.ballVX = (Math.random() > 0.5 ? 1 : -1) * 0.006;
-      }
-
-      // Render
       ctx.fillStyle = '#050505'; ctx.fillRect(0,0,w,h);
       ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fillRect(w/2-2, 0, 4, h);
       
@@ -133,47 +132,105 @@ const TVMode: React.FC = () => {
       ctx.fillStyle = '#10b981'; ctx.fillRect(10, (state.current.p1Y - 0.1) * h, 20, 0.2 * h);
       ctx.fillStyle = '#3b82f6'; ctx.fillRect(w - 30, (state.current.p2Y - 0.1) * h, 20, 0.2 * h);
       
-      // Ball
+      if (joined.p1 && joined.p2) {
+        state.current.ballX += state.current.ballVX;
+        state.current.ballY += state.current.ballVY;
+
+        if (state.current.ballY < 0.05 || state.current.ballY > 0.95) state.current.ballVY *= -1;
+        
+        const paddleH = 0.2;
+        if (state.current.ballX < 0.03 && Math.abs(state.current.ballY - state.current.p1Y) < paddleH/2) {
+          state.current.ballVX = Math.abs(state.current.ballVX) * 1.1;
+          state.current.ballX = 0.031;
+        }
+        if (state.current.ballX > 0.97 && Math.abs(state.current.ballY - state.current.p2Y) < paddleH/2) {
+          state.current.ballVX = -Math.abs(state.current.ballVX) * 1.1;
+          state.current.ballX = 0.969;
+        }
+
+        if (state.current.ballX < 0) { state.current.p2Score++; resetBall(); }
+        if (state.current.ballX > 1) { state.current.p1Score++; resetBall(); }
+      }
+
+      function resetBall() {
+        state.current.ballX = 0.5; state.current.ballY = 0.5;
+        state.current.ballVX = (Math.random() > 0.5 ? 1 : -1) * 0.006;
+      }
+
       ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(state.current.ballX * w, state.current.ballY * h, 12, 0, Math.PI*2); ctx.fill();
 
       frame = requestAnimationFrame(loop);
     };
     loop();
     return () => { peer.destroy(); cancelAnimationFrame(frame); };
-  }, [joined]);
+  }, [joined.p1, joined.p2]);
 
   return (
     <div className="w-full h-full bg-black flex items-center justify-center relative overflow-hidden">
       <canvas ref={canvasRef} className="w-full h-full" />
+      
       {(!joined.p1 || !joined.p2) && (
-        <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center z-50">
-          <h1 className="text-6xl font-black text-white italic mb-12 tracking-tighter">PONG TV</h1>
-          <div className="flex gap-12">
+        <div className="absolute inset-0 bg-black/95 flex flex-col items-center justify-center z-50 p-6">
+          <h1 className="text-6xl font-black text-white italic mb-12 tracking-tighter animate-pulse">PONG TV</h1>
+          
+          <div className="flex flex-wrap justify-center gap-8">
             <QRCard player={1} roomId={roomId} joined={joined.p1} />
             <QRCard player={2} roomId={roomId} joined={joined.p2} />
           </div>
-          <div className="mt-12 text-zinc-500 font-bold tracking-[0.4em] text-xs uppercase">Scan om te spelen</div>
+
+          <div className="mt-12 flex flex-col items-center gap-4">
+            <div className={`px-4 py-2 rounded-full font-bold text-xs tracking-widest uppercase border ${peerStatus === 'ONLINE' ? 'text-emerald-500 border-emerald-500/30 bg-emerald-500/10' : 'text-red-500 border-red-500/30'}`}>
+              KAMER ID: {roomId || '...'} | STATUS: {peerStatus}
+            </div>
+            
+            {/* DEBUG KNOPPEN VOOR AI STUDIO PREVIEW */}
+            <div className="flex gap-4">
+              <button 
+                onClick={() => window.open(`${window.location.origin}${window.location.pathname}?id=${roomId}&p=1`, '_blank')}
+                className="text-[10px] text-zinc-500 hover:text-white underline font-bold uppercase tracking-tighter"
+              >
+                Open P1 in nieuw tabblad (Test)
+              </button>
+              <button 
+                onClick={() => window.open(`${window.location.origin}${window.location.pathname}?id=${roomId}&p=2`, '_blank')}
+                className="text-[10px] text-zinc-500 hover:text-white underline font-bold uppercase tracking-tighter"
+              >
+                Open P2 in nieuw tabblad (Test)
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
   );
 };
 
-const QRCard: React.FC<{ player: 1|2, roomId: string, joined: boolean }> = ({ player, roomId, joined }) => (
-  <div className={`p-8 rounded-[3rem] border-2 transition-all duration-700 flex flex-col items-center ${joined ? 'border-emerald-500 bg-emerald-500/10' : 'border-white/10 bg-white/5'}`}>
-    <div className="mb-6 text-xl font-black text-white italic">SPELER {player}</div>
-    <div className="bg-white p-4 rounded-3xl">
-      <img 
-        src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(`${GITHUB_URL}?id=${roomId}&p=${player}`)}`}
-        alt="QR Code"
-        className={`w-40 h-40 transition-opacity ${joined ? 'opacity-20 grayscale' : 'opacity-100'}`}
-      />
+const QRCard: React.FC<{ player: 1|2, roomId: string, joined: boolean }> = ({ player, roomId, joined }) => {
+  // We bouwen de URL nu heel expliciet op.
+  // We gebruiken de GITHUB_BASE_URL voor de uiteindelijke versie op TV.
+  const qrUrl = `${GITHUB_BASE_URL}index.html?id=${roomId}&p=${player}`;
+
+  return (
+    <div className={`p-6 rounded-[2.5rem] border-2 transition-all duration-700 flex flex-col items-center w-64 ${joined ? 'border-emerald-500 bg-emerald-500/10' : 'border-white/10 bg-white/5'}`}>
+      <div className={`mb-4 text-sm font-black italic ${player === 1 ? 'text-emerald-400' : 'text-blue-400'}`}>SPELER {player}</div>
+      <div className="bg-white p-3 rounded-2xl shadow-2xl">
+        <img 
+          src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(qrUrl)}&bgcolor=ffffff&color=000000`}
+          alt="QR Code"
+          className={`w-32 h-32 transition-all duration-1000 ${joined ? 'opacity-0 scale-50' : 'opacity-100 scale-100'}`}
+        />
+        {joined && (
+          <div className="absolute inset-0 flex items-center justify-center animate-bounce">
+            <span className="text-4xl">✅</span>
+          </div>
+        )}
+      </div>
+      <div className={`mt-4 font-bold uppercase tracking-widest text-[10px] ${joined ? 'text-emerald-400' : 'text-zinc-500'}`}>
+        {joined ? 'KLAAR VOOR START' : 'SCAN MET TELEFOON'}
+      </div>
     </div>
-    <div className={`mt-6 font-bold uppercase tracking-widest text-xs ${joined ? 'text-emerald-400' : 'text-zinc-500'}`}>
-      {joined ? 'READY' : 'WACHTEN...'}
-    </div>
-  </div>
-);
+  );
+};
 
 // --- MAIN APP ENTRY ---
 const App: React.FC = () => {
@@ -184,6 +241,7 @@ const App: React.FC = () => {
     const urlParams = new URLSearchParams(window.location.search);
     const id = urlParams.get('id');
     const p = urlParams.get('p');
+    
     if (id && p) {
       setParams({ id, p: p === '2' ? 2 : 1 });
       setView('CONTROLLER');
@@ -197,17 +255,25 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-10 text-center">
       <div className="mb-16">
         <h1 className="text-8xl font-black text-white italic tracking-tighter">PONG</h1>
-        <p className="text-emerald-500 font-bold tracking-[0.5em] text-xs mt-2">CYBERPUNK EDITION</p>
+        <p className="text-emerald-500 font-bold tracking-[0.5em] text-xs mt-2 uppercase">Google TV Streamer</p>
       </div>
+      
       <div className="grid gap-6 w-full max-w-sm">
         <button 
           onClick={() => setView('TV')}
-          className="bg-white text-black py-8 rounded-[2.5rem] font-black text-xl hover:scale-105 active:scale-95 transition-all shadow-2xl"
+          className="bg-white text-black py-8 rounded-[2.5rem] font-black text-xl hover:scale-105 active:scale-95 transition-all shadow-[0_0_50px_rgba(255,255,255,0.1)]"
         >
-          START ALS TV 📺
+          START GAME OP TV 📺
         </button>
-        <div className="text-zinc-600 text-[10px] uppercase font-bold tracking-widest my-4">— OF —</div>
-        <p className="text-zinc-400 text-xs mb-4">Open deze link op je telefoon via de QR-code op je TV.</p>
+        
+        <p className="text-zinc-500 text-[10px] mt-8 uppercase font-bold tracking-widest leading-relaxed">
+          Open deze pagina op je Google TV.<br/>
+          Scan de QR-codes met je telefoon om te besturen.
+        </p>
+      </div>
+
+      <div className="absolute bottom-8 text-zinc-700 text-[9px] font-mono">
+        v2.0.1 | PeerJS Network Engine
       </div>
     </div>
   );
@@ -215,3 +281,4 @@ const App: React.FC = () => {
 
 const root = ReactDOM.createRoot(document.getElementById('root')!);
 root.render(<App />);
+
